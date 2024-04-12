@@ -61,7 +61,8 @@ def init_st(version_dict, load_ckpt=True, load_filter=True):
 
 
 def load_model(model):
-    model.cuda()
+    # model.cuda()
+    pass
 
 
 lowvram_mode = False
@@ -76,8 +77,8 @@ def initial_model_load(model):
     global lowvram_mode
     if lowvram_mode:
         model.model.half()
-    else:
-        model.cuda()
+    # else:
+    #     model.cuda()
     return model
 
 
@@ -403,6 +404,7 @@ def get_sampler(sampler_name, steps, discretization_config, guider_config, key=1
                 s_tmax=s_tmax,
                 s_noise=s_noise,
                 verbose=True,
+                device="cpu",
             )
         elif sampler_name == "HeunEDMSampler":
             sampler = HeunEDMSampler(
@@ -414,6 +416,7 @@ def get_sampler(sampler_name, steps, discretization_config, guider_config, key=1
                 s_tmax=s_tmax,
                 s_noise=s_noise,
                 verbose=True,
+                device="cpu",
             )
     elif (
         sampler_name == "EulerAncestralSampler"
@@ -430,6 +433,7 @@ def get_sampler(sampler_name, steps, discretization_config, guider_config, key=1
                 eta=eta,
                 s_noise=s_noise,
                 verbose=True,
+                device="cpu",
             )
         elif sampler_name == "DPMPP2SAncestralSampler":
             sampler = DPMPP2SAncestralSampler(
@@ -439,6 +443,7 @@ def get_sampler(sampler_name, steps, discretization_config, guider_config, key=1
                 eta=eta,
                 s_noise=s_noise,
                 verbose=True,
+                device="cpu",
             )
     elif sampler_name == "DPMPP2MSampler":
         sampler = DPMPP2MSampler(
@@ -446,6 +451,7 @@ def get_sampler(sampler_name, steps, discretization_config, guider_config, key=1
             discretization_config=discretization_config,
             guider_config=guider_config,
             verbose=True,
+            device="cpu",
         )
     elif sampler_name == "LinearMultistepSampler":
         order = st.sidebar.number_input("order", value=4, min_value=1)
@@ -455,6 +461,7 @@ def get_sampler(sampler_name, steps, discretization_config, guider_config, key=1
             guider_config=guider_config,
             order=order,
             verbose=True,
+            device="cpu",
         )
     else:
         raise ValueError(f"unknown sampler {sampler_name}!")
@@ -529,107 +536,105 @@ def do_sample(
     st.text("Sampling")
 
     outputs = st.empty()
-    precision_scope = autocast
     with torch.no_grad():
-        with precision_scope("cuda"):
-            with model.ema_scope():
-                if T is not None:
-                    num_samples = [num_samples, T]
-                else:
-                    num_samples = [num_samples]
+        with model.ema_scope():
+            if T is not None:
+                num_samples = [num_samples, T]
+            else:
+                num_samples = [num_samples]
 
-                load_model(model.conditioner)
-                batch, batch_uc = get_batch(
-                    get_unique_embedder_keys_from_conditioner(model.conditioner),
-                    value_dict,
-                    num_samples,
-                    T=T,
-                    additional_batch_uc_fields=additional_batch_uc_fields,
-                )
+            load_model(model.conditioner)
+            batch, batch_uc = get_batch(
+                get_unique_embedder_keys_from_conditioner(model.conditioner),
+                value_dict,
+                num_samples,
+                T=T,
+                additional_batch_uc_fields=additional_batch_uc_fields,
+                device="cpu",
+            )
 
-                c, uc = model.conditioner.get_unconditional_conditioning(
-                    batch,
-                    batch_uc=batch_uc,
-                    force_uc_zero_embeddings=force_uc_zero_embeddings,
-                    force_cond_zero_embeddings=force_cond_zero_embeddings,
-                )
-                unload_model(model.conditioner)
+            c, uc = model.conditioner.get_unconditional_conditioning(
+                batch,
+                batch_uc=batch_uc,
+                force_uc_zero_embeddings=force_uc_zero_embeddings,
+                force_cond_zero_embeddings=force_cond_zero_embeddings,
+            )
+            unload_model(model.conditioner)
 
-                for k in c:
-                    if not k == "crossattn":
-                        c[k], uc[k] = map(
-                            lambda y: y[k][: math.prod(num_samples)].to("cuda"), (c, uc)
+            for k in c:
+                if not k == "crossattn":
+                    c[k], uc[k] = map(
+                        lambda y: y[k][: math.prod(num_samples)], (c, uc)
+                    )
+                if k in ["crossattn", "concat"] and T is not None:
+                    uc[k] = repeat(uc[k], "b ... -> b t ...", t=T)
+                    uc[k] = rearrange(uc[k], "b t ... -> (b t) ...", t=T)
+                    c[k] = repeat(c[k], "b ... -> b t ...", t=T)
+                    c[k] = rearrange(c[k], "b t ... -> (b t) ...", t=T)
+
+            additional_model_inputs = {}
+            for k in batch2model_input:
+                if k == "image_only_indicator":
+                    assert T is not None
+
+                    if isinstance(
+                        sampler.guider,
+                        (
+                            VanillaCFG,
+                            LinearPredictionGuider,
+                            TrianglePredictionGuider,
+                        ),
+                    ):
+                        additional_model_inputs[k] = torch.zeros(
+                            num_samples[0] * 2, num_samples[1]
                         )
-                    if k in ["crossattn", "concat"] and T is not None:
-                        uc[k] = repeat(uc[k], "b ... -> b t ...", t=T)
-                        uc[k] = rearrange(uc[k], "b t ... -> (b t) ...", t=T)
-                        c[k] = repeat(c[k], "b ... -> b t ...", t=T)
-                        c[k] = rearrange(c[k], "b t ... -> (b t) ...", t=T)
-
-                additional_model_inputs = {}
-                for k in batch2model_input:
-                    if k == "image_only_indicator":
-                        assert T is not None
-
-                        if isinstance(
-                            sampler.guider,
-                            (
-                                VanillaCFG,
-                                LinearPredictionGuider,
-                                TrianglePredictionGuider,
-                            ),
-                        ):
-                            additional_model_inputs[k] = torch.zeros(
-                                num_samples[0] * 2, num_samples[1]
-                            ).to("cuda")
-                        else:
-                            additional_model_inputs[k] = torch.zeros(num_samples).to(
-                                "cuda"
-                            )
                     else:
-                        additional_model_inputs[k] = batch[k]
+                        additional_model_inputs[k] = torch.zeros(num_samples)
+                else:
+                    additional_model_inputs[k] = batch[k]
 
-                shape = (math.prod(num_samples), C, H // F, W // F)
-                randn = torch.randn(shape).to("cuda")
+            shape = (math.prod(num_samples), C, H // F, W // F)
+            randn = torch.randn(shape)
 
-                def denoiser(input, sigma, c):
-                    return model.denoiser(
-                        model.model, input, sigma, c, **additional_model_inputs
+            def denoiser(input, sigma, c):
+                return model.denoiser(
+                    model.model, input, sigma, c, **additional_model_inputs
+                )
+
+            load_model(model.denoiser)
+            load_model(model.model)
+            with torch.cpu.amp.autocast(enabled=True, dtype=torch.bfloat16):
+                samples_z = sampler(denoiser, randn, cond=c, uc=uc)
+            unload_model(model.model)
+            unload_model(model.denoiser)
+
+            load_model(model.first_stage_model)
+            model.en_and_decode_n_samples_a_time = (
+                decoding_t  # Decode n frames at a time
+            )
+            samples_x = model.decode_first_stage(samples_z)
+            samples = torch.clamp((samples_x + 1.0) / 2.0, min=0.0, max=1.0)
+            unload_model(model.first_stage_model)
+
+            if filter is not None:
+                samples = filter(samples)
+
+            if T is None:
+                grid = torch.stack([samples])
+                grid = rearrange(grid, "n b c h w -> (n h) (b w) c")
+                outputs.image(grid.cpu().numpy())
+            else:
+                as_vids = rearrange(samples, "(b t) c h w -> b t c h w", t=T)
+                for i, vid in enumerate(as_vids):
+                    grid = rearrange(make_grid(vid, nrow=4), "c h w -> h w c")
+                    st.image(
+                        grid.cpu().numpy(),
+                        f"Sample #{i} as image",
                     )
 
-                load_model(model.denoiser)
-                load_model(model.model)
-                samples_z = sampler(denoiser, randn, cond=c, uc=uc)
-                unload_model(model.model)
-                unload_model(model.denoiser)
-
-                load_model(model.first_stage_model)
-                model.en_and_decode_n_samples_a_time = (
-                    decoding_t  # Decode n frames at a time
-                )
-                samples_x = model.decode_first_stage(samples_z)
-                samples = torch.clamp((samples_x + 1.0) / 2.0, min=0.0, max=1.0)
-                unload_model(model.first_stage_model)
-
-                if filter is not None:
-                    samples = filter(samples)
-
-                if T is None:
-                    grid = torch.stack([samples])
-                    grid = rearrange(grid, "n b c h w -> (n h) (b w) c")
-                    outputs.image(grid.cpu().numpy())
-                else:
-                    as_vids = rearrange(samples, "(b t) c h w -> b t c h w", t=T)
-                    for i, vid in enumerate(as_vids):
-                        grid = rearrange(make_grid(vid, nrow=4), "c h w -> h w c")
-                        st.image(
-                            grid.cpu().numpy(),
-                            f"Sample #{i} as image",
-                        )
-
-                if return_latents:
-                    return samples, samples_z
-                return samples
+            if return_latents:
+                return samples, samples_z
+            return samples
 
 
 def get_batch(
@@ -703,7 +708,7 @@ def get_batch(
             )
         elif key == "cond_aug":
             batch[key] = repeat(
-                torch.tensor([value_dict["cond_aug"]]).to("cuda"),
+                torch.tensor([value_dict["cond_aug"]]),
                 "1 -> b",
                 b=math.prod(N),
             )
@@ -761,6 +766,7 @@ def do_img2img(
                     get_unique_embedder_keys_from_conditioner(model.conditioner),
                     value_dict,
                     [num_samples],
+                    device="cpu",
                 )
                 c, uc = model.conditioner.get_unconditional_conditioning(
                     batch,
@@ -911,11 +917,11 @@ def save_video_as_grid_and_mp4(
         )
         imageio.mimwrite(video_path, vid, fps=fps)
 
-        video_path_h264 = video_path[:-4] + "_h264.mp4"
-        os.system(f"ffmpeg -i '{video_path}' -c:v libx264 '{video_path_h264}'")
-        with open(video_path_h264, "rb") as f:
-            video_bytes = f.read()
-        os.remove(video_path_h264)
-        st.video(video_bytes)
+        # video_path_h264 = video_path[:-4] + "_h264.mp4"
+        # os.system(f"ffmpeg -i '{video_path}' -c:v libx264 '{video_path_h264}'")
+        # with open(video_path_h264, "rb") as f:
+        #     video_bytes = f.read()
+        # os.remove(video_path_h264)
+        # st.video(video_bytes)
 
         base_count += 1

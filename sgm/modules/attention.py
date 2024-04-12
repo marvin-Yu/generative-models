@@ -136,7 +136,7 @@ class LinearAttention(nn.Module):
         self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, 1, bias=False)
         self.to_out = nn.Conv2d(hidden_dim, dim, 1)
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         b, c, h, w = x.shape
         qkv = self.to_qkv(x)
         q, k, v = rearrange(

@@ -5,6 +5,28 @@ sys.path.append(os.path.realpath(os.path.join(os.path.dirname(__file__), "../../
 from pytorch_lightning import seed_everything
 from scripts.demo.streamlit_helpers import *
 from scripts.demo.sv3d_helpers import *
+import xformers
+
+def memory_efficient_attention(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attn_bias: Optional[torch.Tensor] = None,
+    p: float = 0.0,
+    scale: Optional[float] = None,
+    *,
+    op = None,
+) -> torch.Tensor:
+    scale = 1 / query.shape[-1] ** 0.5
+    query = query * scale
+    attn = query @ key.transpose(-2, -1)
+    if attn_bias is not None:
+        attn = attn + attn_bias
+    attn = attn.softmax(-1)
+    # attn = F.dropout(attn, p)
+    return attn @ value
+
+xformers.ops.memory_efficient_attention = memory_efficient_attention
 
 SAVE_PATH = "outputs/demo/vid/"
 
@@ -54,7 +76,7 @@ VERSION2SPECS = {
         "C": 4,
         "f": 8,
         "config": "configs/inference/svd.yaml",
-        "ckpt": "checkpoints/svd_xt.safetensors",
+        "ckpt": "checkpoints/svd_xt_1_1.safetensors",
         "options": {
             "discretization": 1,
             "cfg": 3.0,
@@ -179,7 +201,7 @@ if __name__ == "__main__":
         value_dict["image_only_indicator"] = 0
 
         if mode == "img2vid":
-            img = load_img_for_prediction(W, H)
+            img = load_img_for_prediction(W, H, device="cpu")
             if "sv3d" in version:
                 cond_aug = 1e-5
             else:
